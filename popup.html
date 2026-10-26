@@ -155,7 +155,7 @@
 </head>
 <body>
   <header class="app-header">
-    <h2 style="display:flex;align-items:baseline;gap:8px">AutoDL GPU 监控 <small>1.1.7</small><a id="helpLink" href="help.html" target="_blank" rel="noopener noreferrer" style="margin-left:auto;font-size:12px;font-weight:400;color:#2459aa">使用说明</a></h2>
+    <h2 style="display:flex;align-items:baseline;gap:8px">AutoDL GPU 监控 <small>1.1.8</small><a id="helpLink" href="help.html" target="_blank" rel="noopener noreferrer" style="margin-left:auto;font-size:12px;font-weight:400;color:#2459aa">使用说明</a></h2>
     <nav role="tablist" aria-label="监控模式">
       <button role="tab" data-panel="clone" aria-selected="true">自动克隆</button>
       <button role="tab" data-panel="legacy" aria-selected="false">原实例开机</button>
@@ -177,9 +177,13 @@
     <select id="cloneCount"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>10</option><option>12</option></select>
     <label for="cloneMaxPrice">整台实例价格上限（元/小时，所有卡合计）</label>
     <input id="cloneMaxPrice" type="number" min="0.01" step="0.01" placeholder="例如 3.00" required>
+    <label for="cloneExpandGB">数据盘额外扩容（GB，0 表示不扩容）</label>
+    <input id="cloneExpandGB" type="number" value="0" min="0" step="1" required>
+    <p id="cloneDiskSource" class="muted">填写额外扩容大小，不是数据盘总容量。主机可扩容须严格大于此值。</p>
+    <p class="muted">扩容单独按日收费，不计入上方 GPU 小时价上限，关机后也可能继续收费。开始即授权按填写大小扩容，费用以页面报价为准。</p>
     <label for="cloneInterval">检查间隔（秒，至少 3）</label>
     <input id="cloneInterval" type="number" value="3" min="3" max="3600" required step="1">
-    <p style="font-size:12px">仅按量计费；强制复制系统盘和数据盘；不自动增加付费数据盘容量。</p>
+    <p style="font-size:12px">仅按量计费；复制系统盘和数据盘；选中合格主机后按填写大小扩容。</p>
     <p style="font-size:12px">找到符合条件的主机后自动创建并开机，成功创建一个后停止。</p>
     <div class="button-group">
       <button id="cloneStart" type="button" style="background:#365cf5;color:white">开始监控并自动创建</button>

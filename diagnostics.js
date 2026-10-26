@@ -8,7 +8,7 @@
     'candidateId', 'candidateName', 'selectedModel', 'available', 'cardPrice', 'hourlyQuote',
     'dailyQuote', 'expectedTotal', 'quoteSource', 'rows', 'clicked', 'stockChanged', 'reason',
     'createdAt', 'updatedAt', 'newInstanceId', 'lastSubmissionNotice', 'imageCuda', 'hostCuda', 'incompatibleHosts',
-    'attemptId', 'noticeKind']);
+    'attemptId', 'noticeKind', 'expandGB', 'expandableGB', 'requiredExpansionGB']);
   function redact(value, limit = 700) {
     return String(value)
       .replace(/https?:\/\/[^\s]+/gi, '[URL]')

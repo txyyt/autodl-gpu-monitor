@@ -1,9 +1,9 @@
 (() => {
   const $ = id => document.getElementById(id);
   const message = (action, data = {}) => chrome.runtime.sendMessage({ action, ...data });
-  let cloneTabId, lastJob, starting = false;
+  let cloneTabId, lastJob, starting = false, requiredExpansionGB = 0;
   const edited = new Set();
-  for (const id of ['cloneModels', 'cloneCount', 'cloneMaxPrice', 'cloneInterval']) {
+  for (const id of ['cloneModels', 'cloneCount', 'cloneMaxPrice', 'cloneInterval', 'cloneExpandGB']) {
     for (const event of ['input', 'change']) $(id).addEventListener(event, () => edited.add(id));
   }
   function show(value, phase = 'idle') {
@@ -15,7 +15,7 @@
       uncertain: '需要核实', stopped: '已停止', starting: '正在启动…' }[phase] || '提示');
   }
   function setBusy(active) {
-    for (const id of ['cloneRead', 'cloneModels', 'cloneCount', 'cloneMaxPrice', 'cloneInterval']) $(id).disabled = active;
+    for (const id of ['cloneRead', 'cloneModels', 'cloneCount', 'cloneMaxPrice', 'cloneInterval', 'cloneExpandGB']) $(id).disabled = active;
     $('cloneStart').disabled = active;
     $('cloneStart').textContent = starting ? '正在启动…' : active ? '监控已开启' : '开始监控并自动创建';
     $('cloneStop').disabled = !active || starting;
@@ -29,6 +29,8 @@
     if (!response?.success) throw new Error(response?.error || '请刷新克隆页面以加载新版插件');
     if (response.context.adapterVersion !== CloneCore.VERSION) throw new Error('请刷新 AutoDL 克隆页面，以加载新版网页脚本');
     cloneTabId = tab.id;
+    requiredExpansionGB = response.context.requiredExpansionGB || 0;
+    $('cloneDiskSource').textContent = `源实例已扩容 ${requiredExpansionGB} GB；填写额外扩容大小，不是总容量。主机可扩容须严格大于填写值。`;
     $('cloneSource').textContent = `${response.context.regionName} · ${response.context.sourceId}` +
       (response.context.imageCuda ? ` · 镜像 CUDA ${response.context.imageCuda}` : '');
     const saved = (await chrome.storage.local.get('cloneSettings')).cloneSettings || {};
@@ -41,6 +43,7 @@
     if (saved.count && !edited.has('cloneCount')) $('cloneCount').value = saved.count;
     if (saved.maxPrice && !edited.has('cloneMaxPrice')) $('cloneMaxPrice').value = saved.maxPrice;
     if (saved.interval && !edited.has('cloneInterval')) $('cloneInterval').value = saved.interval;
+    if (!edited.has('cloneExpandGB')) $('cloneExpandGB').value = saved.expandGB ?? 0;
   }
   function render(job) {
     if (lastJob?.id === job?.id && ((job?.updatedAt || 0) < (lastJob?.updatedAt || 0) ||
@@ -55,6 +58,8 @@
       if (active) $('cloneSource').textContent = `${job.context.regionName} · ${job.context.sourceId}` +
         (job.context.imageCuda ? ` · 镜像 CUDA ${job.context.imageCuda}` : '');
       $('cloneRunDetails').textContent = job.round > 0 ? `已检查 ${job.round} 轮` : '首次检查中';
+      if (job.config.expandGB > 0) $('cloneRunDetails').textContent += ` · 扩容 ${job.config.expandGB} GB` +
+        (Number.isFinite(job.selected?.dailyQuote) ? ` · 数据盘 ￥${job.selected.dailyQuote.toFixed(2)}/日` : '');
     } else if (!starting) {
       $('cloneState').hidden = true;
     }
@@ -73,12 +78,14 @@
     .catch(error => show(error.message, 'error')));
   $('cloneStart').addEventListener('click', async () => {
     try {
-      for (const id of ['cloneMaxPrice', 'cloneInterval']) {
+      for (const id of ['cloneMaxPrice', 'cloneInterval', 'cloneExpandGB']) {
         if (!$(id).reportValidity()) return;
       }
       if (!cloneTabId) throw new Error('请先读取当前克隆页，再设置监控条件');
       const cfg = CloneCore.options({ models: Array.from($('cloneModels').selectedOptions).map(e => e.value),
-        count: $('cloneCount').value, maxPrice: $('cloneMaxPrice').value, interval: $('cloneInterval').value });
+        count: $('cloneCount').value, maxPrice: $('cloneMaxPrice').value, interval: $('cloneInterval').value,
+        expandGB: $('cloneExpandGB').value });
+      if (cfg.expandGB < requiredExpansionGB) throw new Error(`源实例已扩容 ${requiredExpansionGB} GB，目标额外扩容不能小于此值`);
       starting = true;
       show('正在核实源实例与地区…', 'starting');
       window.scrollTo({ top: 0, behavior: 'instant' });

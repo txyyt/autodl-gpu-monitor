@@ -34,7 +34,7 @@
     const models = inputs(filter('GPU型号'), 'checkbox').map(e => e.value).filter(v => !['false', 'CPU'].includes(v));
     if (!models.length) throw new Error('GPU 型号尚未加载，请等待页面加载完成');
     const imageCuda = new URL(location.href).searchParams.get('image_cuda');
-    return { ...ctx, imageCuda: C.cudaVersion(imageCuda) ? imageCuda : null,
+    return { ...ctx, requiredExpansionGB: C.sourceExpansion(location.href), imageCuda: C.cudaVersion(imageCuda) ? imageCuda : null,
       adapterVersion: C.VERSION, dataCenter: selected[0].value, regionName: text(selected[0].closest('label')), models };
   }
   function machines() {
@@ -48,7 +48,9 @@
       // Ignore struck-through original prices; the first live price span is the payable card price.
       const priceNode = cells[8].querySelector('.price > span:not([style*="line-through"])');
       const cuda = text(cells[7]).match(/CUDA\s*[:：]\s*(\d+\.\d+(?:\.\d+)?)/i)?.[1] || null;
-      return [{ id: radio.value, name: text(cells[1]), model, cuda,
+      const capacity = text(cells[6]).match(/可扩容\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*GB/i);
+      const expandableGB = capacity ? Number(capacity[1].replace(/,/g, '')) : null;
+      return [{ id: radio.value, name: text(cells[1]), model, cuda, expandableGB,
         available: free ? Number(free[1]) : -1, price: C.money(text(priceNode)),
         enabled: !radio.disabled, row, radio }];
     });
@@ -77,7 +79,7 @@
     let stable = 0;
     for (let i = 0; i < 60; i++) {
       await current(job);
-      const fingerprint = machines().map(m => `${m.id}:${m.available}:${m.price}`).join('|');
+      const fingerprint = machines().map(m => `${m.id}:${m.available}:${m.price}:${m.expandableGB}`).join('|');
       stable = fingerprint === previous && !loading() ? stable + 1 : 0;
       previous = fingerprint;
       if (stable >= 2) return;
@@ -154,26 +156,81 @@
     const count = inputs(filter('GPU数量'), 'radio').find(e => e.checked)?.value;
     if (Number(count) !== job.config.count) throw new Error('GPU 数量发生变化');
     if (!document.querySelector('input[type="radio"][value="payg"]')?.checked) throw new Error('计费模式发生变化');
+    await configureDisk(job);
+    const afterDisk = machines().find(m => m.id === machine.id && m.radio.checked);
+    if (!afterDisk || !C.eligible(afterDisk, job.config, job.context.imageCuda)) {
+      const error = new Error('填写扩容期间主机库存或容量变化，继续等待'); error.stockChanged = true; throw error;
+    }
     let quoted;
     try { quoted = C.hourlyQuote(document); }
     finally {
       await rpc('cloneDiagnostic', { id: job.id, event: 'price.check', details: {
-        hourlyQuote: quoted ?? null, dailyQuote: Number(document.querySelector('.sum .daily-cost .num')?.textContent),
+        hourlyQuote: quoted ?? null, dailyQuote: job.config.expandGB > 0 ? C.dailyQuote(document) : Number(document.querySelector('.sum .daily-cost .num')?.textContent),
         quoteSource: '配置费用', cardPrice: fresh.price, expectedTotal: fresh.price * job.config.count,
         maxPrice: job.config.maxPrice, count: job.config.count, candidateId: fresh.id, selectedModel: fresh.model,
-        imageCuda: job.context.imageCuda, hostCuda: fresh.cuda
+        imageCuda: job.context.imageCuda, hostCuda: fresh.cuda,
+        expandGB: job.config.expandGB || 0, expandableGB: afterDisk.expandableGB
       } }).catch(() => {});
     }
     if (quoted > job.config.maxPrice || Math.abs(quoted - fresh.price * job.config.count) > 0.011) {
       throw new Error(`报价核对失败：配置费用 ￥${quoted.toFixed(2)}/小时；单卡 ￥${fresh.price.toFixed(2)} × ${job.config.count}；上限 ￥${job.config.maxPrice.toFixed(2)}/小时`);
     }
-    // Paid disk expansion is not included in an hourly GPU cap. Do not silently add daily charges.
-    const diskInputs = Array.from(document.querySelectorAll('.el-input-number input'));
-    if (diskInputs.some(e => !Number.isFinite(Number(e.value)) || Number(e.value) !== 0) ||
-        Number(new URL(location.href).searchParams.get('expand_size') || 0) !== 0) {
-      throw new Error('检测到付费数据盘扩容，请先处理容量和费用后再监控');
+    assertDisk(job);
+    const daily = job.config.expandGB > 0 ? C.dailyQuote(document) : 0;
+    await rpc('cloneProgress', { id: job.id, stage: 'checking',
+      message: `已核对：GPU ￥${quoted.toFixed(2)}/小时；扩容 ${job.config.expandGB || 0} GB，数据盘 ￥${daily.toFixed(2)}/日` });
+    return { id: fresh.id, name: fresh.name, model: fresh.model, price: fresh.price, total: quoted, cuda: fresh.cuda,
+      expandGB: job.config.expandGB || 0, expandableGB: afterDisk.expandableGB, dailyQuote: daily };
+  }
+  function diskControls() {
+    const checks = Array.from(document.querySelectorAll('.needExpand input[type="checkbox"]'));
+    const fields = Array.from(document.querySelectorAll('.disk-size input[role="spinbutton"]'));
+    if (checks.length > 1 || fields.length > 1) throw new Error('数据盘扩容控件不唯一，请停止并检查页面');
+    return { check: checks[0], field: fields[0] };
+  }
+  function assertDisk(job) {
+    const wanted = job.config.expandGB || 0;
+    const { check, field } = diskControls();
+    if (wanted === 0) {
+      if (check?.checked || !check && field && Number(field.value || 0) !== 0) throw new Error('页面存在未授权的数据盘扩容，请取消扩容后重试');
+      return;
     }
-    return { id: fresh.id, name: fresh.name, model: fresh.model, price: fresh.price, total: quoted, cuda: fresh.cuda };
+    if (!check?.checked || !field || field.disabled || field.value.trim() === '' || Number(field.value) !== wanted ||
+        !Number.isFinite(Number(field.getAttribute('max'))) || Number(field.getAttribute('max')) < wanted) {
+      throw new Error(`数据盘扩容核对失败：必须勾选扩容并准确填写 ${wanted} GB`);
+    }
+  }
+  async function configureDisk(job) {
+    const wanted = job.config.expandGB || 0;
+    const before = diskControls();
+    if (!before.check) {
+      if (wanted > 0) throw new Error('找不到“需要扩容”控件，请检查页面');
+      return;
+    }
+    if (before.check.checked !== (wanted > 0)) await clickInput(before.check, job);
+    if (wanted === 0) { assertDisk(job); return; }
+    await current(job);
+    const { field } = diskControls();
+    if (!field || field.disabled || !field.hasAttribute('max') || Number(field.getAttribute('max')) < wanted) {
+      const error = new Error('目标主机扩容上限不足或输入框未就绪，继续等待'); error.stockChanged = true; throw error;
+    }
+    field.value = String(wanted);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    field.blur();
+    let previous = '', stable = 0;
+    for (let i = 0; i < 40; i++) {
+      await sleep(200);
+      await current(job);
+      try {
+        assertDisk(job);
+        const fingerprint = `${C.hourlyQuote(document)}:${C.dailyQuote(document)}`;
+        stable = fingerprint === previous && !loading() ? stable + 1 : 0;
+        previous = fingerprint;
+        if (stable >= 2) return;
+      } catch (_) { stable = 0; }
+    }
+    throw new Error('扩容容量或日常费用未能核对，请检查页面后重试');
   }
   async function run() {
     if (busy || location.pathname !== '/cloneInstance') return;
@@ -194,6 +251,7 @@
         rows: machines().length, candidateId: found?.id, candidateName: found?.name,
         selectedModel: found?.model, available: found?.available, cardPrice: found?.price,
         imageCuda: job.context.imageCuda, hostCuda: found?.cuda,
+        expandGB: job.config.expandGB || 0, expandableGB: found?.expandableGB,
         incompatibleHosts: machines().filter(m => C.cudaCompatible(job.context.imageCuda, m.cuda) === false).map(m => m.name)
       } }).catch(() => {});
       await rpc('cloneRoundComplete', { id: job.id, roundId: crypto.randomUUID() });
@@ -226,6 +284,8 @@
       if (!fresh || !C.eligible(fresh, job.config, job.context.imageCuda) || C.hourlyQuote(document) !== selected.total) {
         const error = new Error('提交前库存或报价变化，继续监控'); error.stockChanged = true; throw error;
       }
+      assertDisk(job);
+      if (job.config.expandGB > 0 && C.dailyQuote(document) !== selected.dailyQuote) throw new Error('数据盘日常费用发生变化，已停止提交，请核对');
       const allowed = await rpc('clonePermit', { id: job.id, attemptId });
       if (!allowed?.success) throw new Error('提交已取消');
       const inspectSubmission = observeSubmission(job, attemptId);

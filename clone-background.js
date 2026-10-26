@@ -12,7 +12,8 @@ async function saveCloneJob(job) {
     region: job.context?.region, pageVersion: job.context?.adapterVersion,
     phase: job.phase, stage: job.stage, round: job.round, message: job.message,
     createdAt: job.createdAt, lastSubmissionNotice: job.lastSubmissionNotice, attemptId: job.attemptId,
-    candidateId: job.selected?.id, candidateName: job.selected?.name, imageCuda: job.context?.imageCuda },
+    candidateId: job.selected?.id, candidateName: job.selected?.name, imageCuda: job.context?.imageCuda,
+    expandGB: job.config?.expandGB, expandableGB: job.selected?.expandableGB, dailyQuote: job.selected?.dailyQuote },
     ['error', 'uncertain'].includes(job.phase) ? 'error' : 'info');
   const badge = { watching: ['ON', '#13854b'], submitting: ['…', '#2563eb'], submitted: ['…', '#2563eb'],
     error: ['ERR', '#dc2626'], uncertain: ['!', '#b45309'], success: ['OK', '#13854b'] }[job.phase];
@@ -54,7 +55,8 @@ async function handleCloneMessage(request, sender) {
     currentJob: cleanDiagnosticDetails({ jobId: job?.id, phase: job?.phase, round: job?.round,
       pageVersion: job?.context?.adapterVersion, sourceId: job?.context?.sourceId,
       message: job?.message, createdAt: job?.createdAt, updatedAt: job?.updatedAt,
-      lastSubmissionNotice: job?.lastSubmissionNotice }) };
+      lastSubmissionNotice: job?.lastSubmissionNotice, expandGB: job?.config?.expandGB,
+      expandableGB: job?.selected?.expandableGB, dailyQuote: job?.selected?.dailyQuote }) };
   if (request.action === 'diagnosticClear') { await diagnosticLog.clear(); return { success: true }; }
   if (request.action === 'diagnosticPopup') {
     await diagnosticLog.append('popup.open', { popupVersion: request.popupVersion });
@@ -70,6 +72,8 @@ async function handleCloneMessage(request, sender) {
     const { context } = await sendClonePage(request.tabId, { action: 'cloneContext' });
     await diagnosticLog.append('page.version', { pageVersion: context.adapterVersion, sourceId: context.sourceId, region: context.region });
     if (context.adapterVersion !== CloneCore.VERSION) throw new Error('AutoDL 页面仍在运行旧版脚本，请刷新克隆页面后重试');
+    const requiredExpansionGB = CloneCore.sourceExpansion(context.url);
+    if (cfg.expandGB < requiredExpansionGB) throw new Error(`源实例已扩容 ${requiredExpansionGB} GB，目标额外扩容不能小于此值`);
     if (cfg.models.some(model => !context.models.includes(model))) throw new Error('所选 GPU 型号不属于源实例地区');
     stopLegacyMonitor();
     legacyCloneLocked = true;
@@ -185,6 +189,9 @@ async function handleCloneMessage(request, sender) {
         (job.excludedHosts || []).includes(request.selected.id) ||
         job.hostCooldowns?.[request.selected.id] > Date.now() ||
         CloneCore.cudaCompatible(job.context.imageCuda, request.selected.cuda) === false ||
+        !CloneCore.expansionFits(request.selected, job.config.expandGB || 0) ||
+        (request.selected.expandGB || 0) !== (job.config.expandGB || 0) ||
+        job.config.expandGB > 0 && (!Number.isFinite(request.selected.dailyQuote) || request.selected.dailyQuote < 0) ||
         !Number.isFinite(request.selected.total) || !Number.isFinite(request.selected.price) ||
         request.selected.total > job.config.maxPrice || request.selected.total <= 0 ||
         Math.abs(request.selected.total - request.selected.price * job.config.count) > 0.011) throw new Error('提交参数不符合限制');

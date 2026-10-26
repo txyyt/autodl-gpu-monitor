@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AutoDL GPU 自动抢机助手",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "监控实例开机，或按 GPU 型号、数量和价格上限在源地区克隆实例（复制数据盘）",
   "permissions": [
     "storage",

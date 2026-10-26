@@ -37,7 +37,7 @@ test('config rejects missing GPU, CPU, invalid quantity, unbounded budget or rap
   assert.equal('preview' in C.options({ ...config, preview: true }), false);
 });
 
-function worker(store, snapshots = []) {
+function worker(store, snapshots = [], startContext) {
   let onMessage, alarm;
   const notices = [];
   const sandbox = { console, URL, crypto: require('node:crypto').webcrypto, CloneCore: C,
@@ -54,6 +54,8 @@ function worker(store, snapshots = []) {
       tabs: { create: async () => ({ id: 99 }), remove: async () => {},
         get: async id => ({ id, status: 'complete', url: 'https://www.autodl.com/console/instance/list' }),
         sendMessage: async (id, request) => {
+          if (startContext && request.action === 'cloneContext') return { success: true, context: startContext };
+          if (startContext && request.action === 'cloneRun') return { success: true };
           assert.equal(request.action, 'cloneListSnapshot', 'tracking may only read instance lists');
           return { success: true, instances: snapshots };
         } }
@@ -179,7 +181,8 @@ test('DOM adapter reads live-style clone controls, ignores old price and fails o
 
 async function pageWorkflow({ preview = false, available = 2, quoted = 3.96, cancelOnReserve = false, lostOnSelect = false,
   imageCuda, hostCuda = '13.0', notice, noticeKind = 'notification', preexistingNotice,
-  excludedHosts = [], hostCooldowns = {} } = {}) {
+  excludedHosts = [], hostCooldowns = {}, expandGB = 0, expandableGB = 100, sourceGB = 0,
+  diskMax, lostCapacity = false, clampDisk = false, changeDailyOnReserve = false } = {}) {
   const { parseHTML } = require('linkedom');
   const { document, window } = parseHTML(`<html><body>
     克隆实例仅能在同一地区内进行，以实例：source-abc的系统创建新实例
@@ -194,13 +197,15 @@ async function pageWorkflow({ preview = false, available = 2, quoted = 3.96, can
       <div class="el-table__body-wrapper"><table class="el-table__body"><tbody><tr>
         <td><input type="radio" value="host123"></td><td>123机</td>
         <td><div class="cell"><div>RTX 4090<br>24GB</div></div></td><td>${available} / 8</td>
-        <td>CPU</td><td>Xeon</td><td>50GB</td><td>驱动: 580.105.08 CUDA: ${hostCuda}</td>
+        <td>CPU</td><td>Xeon</td><td>数据盘：50GB 可扩容：${expandableGB}GB</td><td>驱动: 580.105.08 CUDA: ${hostCuda}</td>
         <td><div class="price"><span>￥1.98</span>/时</div></td>
       </tr></tbody></table></div></div><div class="sum">
         <div class="daily-cost"><span class="pay-mode">日常费用：</span><span class="rmb">￥</span><span class="num">0.00</span><span class="unit">/日</span></div>
         <div><span class="pay-mode">配置费用：</span><span class="rmb">￥</span><span class="num">${quoted}</span><span class="unit">/时</span></div>
       </div>
+      ${expandGB > 0 ? '<label class="needExpand"><input type="checkbox" value="需要扩容">需要扩容</label><div class="disk-size"><input role="spinbutton" min="0" max="0" value="0"></div>' : ''}
       <button>创建并开机</button></body></html>`);
+  const uiEvents = [];
   window.__autodlCloneAdapter = false;
   document.querySelector('.sort-caret.descending').addEventListener('click', () =>
     document.querySelector('th').classList.toggle('descending'));
@@ -210,7 +215,23 @@ async function pageWorkflow({ preview = false, available = 2, quoted = 3.96, can
   }
   document.querySelector('.el-table__body tr').addEventListener('click', () =>
     { document.querySelector('input[value="host123"]').setAttribute('checked', '');
+      uiEvents.push('select-host');
+      if (lostCapacity) document.querySelector('.el-table__body tr').children[6].textContent = '数据盘:50GB 可扩容:10GB';
+      const diskField = document.querySelector('.disk-size input');
+      if (diskField) diskField.setAttribute('max', String(diskMax ?? expandableGB));
       if (lostOnSelect) document.querySelector('.el-table__body tr').children[3].textContent = '0 / 8'; });
+  if (expandGB > 0) {
+    const check = document.querySelector('.needExpand input'), field = document.querySelector('.disk-size input');
+    check.closest('label').addEventListener('click', () => { check.toggleAttribute('checked'); uiEvents.push('expand-toggle'); });
+    field.blur = () => {};
+    field.addEventListener('input', () => {
+      assert.ok(document.querySelector('input[value="host123"]').checked, 'host must be selected before expansion input');
+      assert.equal(check.checked, true);
+      uiEvents.push(`input-${field.value}`);
+      if (clampDisk) field.value = '0';
+      document.querySelector('.daily-cost .num').textContent = '2.50';
+    });
+  }
   const create = document.querySelector('button');
   create.getClientRects = () => [1];
   let clicks = 0;
@@ -240,7 +261,9 @@ async function pageWorkflow({ preview = false, available = 2, quoted = 3.96, can
   let reloadScheduled = false;
   const job = watching(preview);
   const observers = [];
-  const pageUrl = imageCuda ? `${url}&image_cuda=${imageCuda}` : url;
+  const sourceUrl = url.replace('expand_size=0', `expand_size=${sourceGB * 1024 ** 3}`);
+  const pageUrl = imageCuda ? `${sourceUrl}&image_cuda=${imageCuda}` : sourceUrl;
+  job.config = { ...job.config, expandGB };
   job.context = { ...job.context, ...C.context(pageUrl), imageCuda };
   job.excludedHosts = excludedHosts; job.hostCooldowns = hostCooldowns;
   const sandbox = { CloneCore: C, window, document, location: { href: pageUrl, pathname: '/cloneInstance', reload() {} },
@@ -253,7 +276,11 @@ async function pageWorkflow({ preview = false, available = 2, quoted = 3.96, can
       requests.push(request);
       if (request.action === 'cloneError') actions.push(request.message);
       if (request.action === 'cloneJob') return { job };
-      if (request.action === 'cloneReserve') { job.phase = cancelOnReserve ? 'stopped' : 'submitting'; job.selected = request.selected; job.attemptId = 'attempt'; return { success: true, attemptId: 'attempt' }; }
+      if (request.action === 'cloneReserve') {
+        job.phase = cancelOnReserve ? 'stopped' : 'submitting'; job.selected = request.selected; job.attemptId = 'attempt';
+        if (changeDailyOnReserve) document.querySelector('.daily-cost .num').textContent = '3.00';
+        return { success: true, attemptId: 'attempt' };
+      }
       if (request.action === 'clonePermit') return { success: job.phase === 'submitting' };
       if (request.action === 'cloneClicked') job.phase = 'submitted';
       if (request.action === 'cloneSubmissionRejected') job.phase = 'watching';
@@ -263,7 +290,7 @@ async function pageWorkflow({ preview = false, available = 2, quoted = 3.96, can
   vm.runInContext(fs.readFileSync(path.join(root, 'clone-page.js'), 'utf8')
     .replace('  chrome.runtime.onMessage.addListener', '  globalThis.runAdapter = run;\n  chrome.runtime.onMessage.addListener'), sandbox);
   await sandbox.runAdapter();
-  return { clicks, actions, reloadScheduled, requests, job, reselects,
+  return { clicks, actions, reloadScheduled, requests, job, reselects, uiEvents,
     emitNotice: async (value, kind) => {
       appendNotice(value, kind);
       for (const observer of observers) if (observer.active) observer.callback();
@@ -491,4 +518,70 @@ test('stock cooldown expires but an observed new instance or unknown rejection n
   delete store.cloneMonitorJob.newInstanceId;
   assert.equal((await w.send('cloneSubmissionRejected', { ...request, adapterVersion: 'old' })).success, false);
   assert.equal((await w.send('cloneSubmissionRejected', { ...request, reason: 'unknown' })).success, false);
+});
+
+test('expansion input and source byte units are validated without treating GB as total disk size', () => {
+  assert.equal(C.sourceExpansion(url.replace('expand_size=0', `expand_size=${50 * 1024 ** 3}`)), 50);
+  for (const value of ['50', '-1', 'abc', '9007199254740993']) {
+    assert.throws(() => C.sourceExpansion(url.replace('expand_size=0', `expand_size=${value}`)));
+  }
+  assert.equal(C.options({ ...config, expandGB: 50 }).expandGB, 50);
+  for (const value of ['', ' ', false, null, -1, 1.5, Infinity, 'x', 9007199254740992]) assert.throws(() => C.options({ ...config, expandGB: value }));
+  for (const capacity of [0, 49, 50, null, undefined, NaN]) {
+    assert.equal(C.eligible({ ...machine, expandableGB: capacity }, { ...config, expandGB: 50 }), false);
+  }
+  assert.equal(C.eligible({ ...machine, expandableGB: 51 }, { ...config, expandGB: 50 }), true);
+});
+
+test('expansion is applied after host selection and daily fee remains separate from hourly cap', async () => {
+  const result = await pageWorkflow({ expandGB: 50, sourceGB: 50, expandableGB: 100 });
+  assert.equal(result.clicks, 1, JSON.stringify(result.actions));
+  assert.deepEqual(result.uiEvents, ['select-host', 'expand-toggle', 'input-50']);
+  const selected = result.requests.find(r => r.action === 'cloneReserve').selected;
+  assert.equal(selected.expandGB, 50);
+  assert.equal(selected.expandableGB, 100);
+  assert.equal(selected.dailyQuote, 2.5);
+  assert.equal(selected.total, 3.96);
+  const quote = result.requests.find(r => r.action === 'cloneDiagnostic' && r.event === 'price.check');
+  assert.equal(quote.details.expandGB, 50);
+  assert.equal(quote.details.dailyQuote, 2.5);
+});
+
+test('insufficient disk capacity, changing capacity, disabled range and clamped values cannot create', async () => {
+  for (const opts of [{ expandableGB: 50 }, { expandableGB: 49 }, { lostCapacity: true }, { diskMax: 10 }, { clampDisk: true }]) {
+    const result = await pageWorkflow({ expandGB: 50, ...opts });
+    assert.equal(result.clicks, 0, JSON.stringify(opts));
+    assert.equal(result.actions.includes('cloneReserve'), false, JSON.stringify(result.actions));
+  }
+  const changed = await pageWorkflow({ expandGB: 50, changeDailyOnReserve: true });
+  assert.equal(changed.clicks, 0);
+  assert.ok(changed.actions.some(a => a.includes('日常费用发生变化')));
+});
+
+test('background independently rejects unauthorized expansion quantities, capacity and missing daily fee', async () => {
+  for (const delta of [{ expandGB: 49 }, { expandableGB: 50 }, { dailyQuote: NaN }, { dailyQuote: -1 }]) {
+    const job = watching(); job.config.expandGB = 50;
+    const store = { cloneMonitorJob: job }, w = worker(store);
+    const result = await w.send('cloneReserve', { id: 'job-1', selected: { ...selected, expandGB: 50, expandableGB: 100, dailyQuote: 2.5, ...delta } });
+    assert.equal(result.success, false);
+    assert.equal(store.cloneMonitorJob.phase, 'watching');
+  }
+  const job = watching(); job.config.expandGB = 50;
+  assert.equal((await worker({ cloneMonitorJob: job }).send('cloneReserve', {
+    id: 'job-1', selected: { ...selected, expandGB: 50, expandableGB: 100, dailyQuote: 2.5 }
+  })).success, true);
+});
+
+test('start refuses an expansion smaller than source and accepts an explicit sufficient quantity', async () => {
+  const expandedUrl = url.replace('expand_size=0', `expand_size=${50 * 1024 ** 3}`);
+  const ctx = { ...C.context(expandedUrl), adapterVersion: C.VERSION, models: ['RTX 4090'], regionName: '重庆A区' };
+  const store = {};
+  const w = worker(store, [{ id: 'source-abc', status: '已关机', region: '重庆A区' }], ctx);
+  const rejected = await w.send('cloneStart', { tabId: 7, config: { ...config, expandGB: 49 } });
+  assert.equal(rejected.success, false);
+  assert.match(rejected.error, /源实例已扩容 50 GB/);
+  assert.equal(store.cloneMonitorJob, undefined);
+  const accepted = await w.send('cloneStart', { tabId: 7, config: { ...config, expandGB: 50 } });
+  assert.equal(accepted.success, true);
+  assert.equal(store.cloneMonitorJob.config.expandGB, 50);
 });
