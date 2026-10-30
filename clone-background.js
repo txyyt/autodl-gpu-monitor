@@ -83,7 +83,10 @@ async function handleCloneMessage(request, sender) {
     const source = baseline.find(instance => instance.id === context.sourceId);
     if (!source || !source.status.includes('已关机') || source.region !== context.regionName) {
       legacyCloneLocked = false;
-      throw new Error('源实例必须已关机，且必须属于克隆页面所选地区');
+      if (!source) throw new Error('实例列表中未找到源实例，请核对克隆页面的源实例 ID');
+      if (!source.status.includes('已关机')) throw new Error(`源实例尚未关机，读取到的状态：${source.status || '未知'}`);
+      if (!source.region) throw new Error('无法从实例列表识别源实例地区，请导出诊断日志并检查实例行格式');
+      throw new Error(`源实例地区（${source.region}）与克隆页面地区（${context.regionName}）不一致`);
     }
     stopLegacyMonitor();
     job = { id: crypto.randomUUID(), phase: 'watching', tabId: request.tabId, context,

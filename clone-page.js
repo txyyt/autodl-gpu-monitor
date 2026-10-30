@@ -409,7 +409,7 @@
         const cells = Array.from(row.querySelectorAll('td'));
         const id = text(cells[0]).match(/\b[\w]+-[\w]+\b/)?.[0];
         if (!id) throw new Error('无法读取实例 ID');
-        const regionHost = text(cells[0]).match(/^(.+?区)\s*\/\s*(\d+机)/);
+        const regionHost = text(cells[0]).match(/^(.+?区)\s*\/\s*([A-Za-z0-9]+机)/);
         result.set(id, { id, region: regionHost?.[1], host: regionHost?.[2],
           spec: text(cells[2]), status: text(cells[1]) });
       }

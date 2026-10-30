@@ -142,6 +142,31 @@ test('unique new GPU-running instance ends job; existing busy 710 instance is ig
   assert.equal(w.notices.filter(n => n.email).length, 1);
 });
 
+test('instance list reads numeric and letter-prefixed hosts with their regions', async () => {
+  const { parseHTML } = require('linkedom');
+  for (const host of ['007机', 'E49机']) {
+    const { document, window } = parseHTML(`<html><body>
+      <table class="el-table__body"><tbody><tr>
+        <td>西北B区 / ${host}<br>g2rmhqwyut-f1c5cd0f<br>用户创建</td>
+        <td>已关机</td><td>vGPU-32GB * 1卡</td>
+      </tr></tbody></table>
+    </body></html>`);
+    let listener;
+    const sandbox = { CloneCore: C, window: {}, document, location: { pathname: '/console/instance/list' },
+      URL, console, setInterval: () => 1,
+      chrome: { runtime: { onMessage: { addListener(fn) { listener = fn; } } } } };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(path.join(root, 'clone-page.js'), 'utf8'), sandbox);
+    const response = await new Promise(resolve => listener({ action: 'cloneListSnapshot' }, {}, resolve));
+    assert.equal(response.success, true);
+    assert.equal(response.instances.length, 1);
+    assert.equal(response.instances[0].id, 'g2rmhqwyut-f1c5cd0f');
+    assert.equal(response.instances[0].region, '西北B区');
+    assert.equal(response.instances[0].host, host);
+    assert.equal(response.instances[0].status, '已关机');
+  }
+});
+
 test('DOM adapter reads live-style clone controls, ignores old price and fails on unlocked region', async () => {
   const { parseHTML } = require('linkedom');
   const { document, window } = parseHTML(`<html><body>
